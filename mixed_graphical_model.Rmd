@@ -183,9 +183,9 @@ $\sum_j N_j$ in the matrix product. I.e. I am imaging that feature $j$ has been 
 5. If we can write out the objective with a single `X` matrix, then I think the $\Theta[j,k]$ gradient will simply look at the `k` rows of the `j` loss plus the `j` rows of the `k` loss.
 
 
-### Toy example
+### Data example
 
-Let's make a data frame with 7 features, 2 binary, 2 categorical and 3 continuous. We'll code the binary as multinomial.
+Here is a subset of data from `ATL06`.
 
 ```{python}
 import numpy as np, pandas as pd
@@ -193,8 +193,8 @@ from itertools import product
 import matplotlib.pyplot as plt
 # %matplotlib inline
 
-
-D = pd.read_csv('atl06.csv') # .iloc[:5000]
+np.random.seed(1)
+D = pd.read_csv('atl06.csv')
 D = D.dropna()
 del(D['Unnamed: 0'])
 D.columns, D.shape
@@ -235,28 +235,25 @@ desc = [('s_li', 'continuous'),
         ('c_flg_asr', 'categorical'),
         ('c_flg_atm', 'categorical'),
         ('msw', 'categorical' ),
-        #('bsnow_h', 'continuous'),
-        #('bsnow_od', 'continuous'),
+        #('bsnow_h', 'continuous'), -- too little variation
+        #('bsnow_od', 'continuous'), -- too little variation
         ('layer_flag', 'binary'),
         ('bckgrd', 'continuous'),
         ('e_bckgrd', 'continuous'),
         ('n_fit_photons', 'continuous'),
         ('w_surface_window_final', 'continuous')]
 desc
-(np.mean(D['bsnow_od'] == D['bsnow_od'].max()), 
- np.mean(D['bsnow_h'] == D['bsnow_h'].max()))
-np.percentile(D['w_surface_window_final'], [2,98])
 ```
 
 ```{python}
-X, desc2 = make_design(D, desc)
-#X = X[np.random.choice(np.arange(X.shape[0]), 50000, replace=False)]
-desc2
+X, desc_full = make_design(D, desc)
+X = X[np.random.choice(np.arange(X.shape[0]), 5000, replace=False)]
+desc_full
 np.unique(D['snr']), np.unique(D['h_rb'])
 ```
 
 ```{python}
-[(len(np.unique(D[c])), t) for c, t, _ in desc2[1:]]
+[(len(np.unique(D[c])), t) for c, t, _ in desc_full[1:]]
 ```
 
 ### Form saturated losses 
@@ -269,6 +266,7 @@ we will use the special Gaussian loss described above.
 ```{python}
 from regreg.smooth.mglm import multinomial_loglike
 from regreg.smooth.glm import gaussian_loglike
+from regreg.problems.newton import quasi_newton
 import regreg.api as rr        
 ```
 
@@ -283,12 +281,6 @@ def _reshape(G):
     if G.ndim == 1:
         return G.reshape((-1, 1))
     return G
-
-class gaussian_loss(rr.smooth_atom):
-
-    """
-    This codes up (11) of Lee and Hastie
-    """
 
 class full_loss(rr.smooth_atom):
     
@@ -331,7 +323,8 @@ class full_loss(rr.smooth_atom):
                     l, u = np.percentile(response, [2, 98]) # quick and dirty cleaning..
                     response = np.clip(response, l, u)
                 response -= np.mean(response)
-                response /= np.std(response)
+                if np.std(response) > 0:
+                    response /= np.std(response)
                 self.X[:,idx] = response[:,None]
                 self.sum_sq.append((response**2).sum())
                 self.desc.append((var, dtype, idx,
@@ -376,12 +369,11 @@ class full_loss(rr.smooth_atom):
                 if _scale_idx is not None: # continuous variable
                     _scale = scale_arg[_scale_idx]
                     _eta = np.squeeze(eta[:,_slice])
-                    _fval, _gval = _loss.smooth_objective(_eta / 
-                                                          _scale, 'both')
+                    _fval = np.sum((_loss.response - _eta / _scale)**2) * _scale / 2.
+                    _gval = _eta / _scale - _loss.response
                     scale_grad[_scale_idx] = 0.5 * ((- nobs / _scale) + 
                                                         self.sum_sq[_scale_idx] -
-                                                        1. / _scale**2 * (_eta**2).sum())
-                    _fval *= _scale
+                                                        (1. / _scale**2) * (_eta**2).sum())
                     _fval += -nobs * 0.5 * np.log(_scale)
                 else:
                     _fval, _gval = _loss.smooth_objective(eta[:,_slice], 
@@ -410,7 +402,7 @@ class full_loss(rr.smooth_atom):
 ```
 
 ```{python}
-loss = full_loss(X, desc2)
+loss = full_loss(X.copy(), desc_full)
 F, G = loss.smooth_objective(np.zeros(loss.shape), 'both')
 G.shape
 X.std(0), loss.shape
@@ -434,38 +426,21 @@ $$
 R, C = np.zeros((2, X.shape[1], X.shape[1]), np.int)
 var_names = list(D.columns) + ['intercept']
 
-for l, r in product(desc2, desc2):
+for l, r in product(desc_full, desc_full):
     l_slice = l[2]
     r_slice = r[2]
     R[l_slice][:,r_slice] = R[r_slice][:,l_slice] = var_names.index(r[0])
     C[l_slice][:,r_slice] = C[r_slice][:,l_slice] = var_names.index(l[0])  
 I = np.transpose(np.array([R, C]), [1, 2, 0])
-I.shape
-```
-
-```{python}
-B2_slice, M1_slice = desc2[1][2], desc2[2][2]
-B2_slice, M1_slice
-```
-
-```{python}
-I[B2_slice][:,M1_slice][:,:,0], I[M1_slice][:,B2_slice][:,:,0]
-```
-
-```{python}
-I[B2_slice][:,M1_slice][:,:,1], I[M1_slice][:,B2_slice][:,:,1]
-```
-
-```{python}
 groups = ['-'.join(sorted([var_names[r], var_names[c]])) for r, c in zip(R.reshape(-1), C.reshape(-1))]
-len(groups), groups[:40]
+len(groups), groups[0:100:10]
 ```
 
 ```{python}
 weights = {}
 covs = {}
-for d in desc2:
-    X_ = X[:,d[2]] * 1.
+for d in desc_full:
+    X_ = loss.X[:,d[2]] * 1.
     X_ = X_ - X_.mean(0)
     C_ = X_.T.dot(X_) / X_.shape[0]
     covs[d[0]] = np.diag(C_).sum()
@@ -478,17 +453,21 @@ for d in loss.desc:
     if d[1] == 'continuous':
         weights[d[0]+'-scale'] = 0
         groups.append(d[0]+'-scale')
-weights
 ```
 
 ```{python}
-penalty = rr.group_lasso(list(groups), weights=weights, lagrange=10 * np.sqrt(X.shape[0]))
+groups = list(groups)
+penalty = rr.group_lasso(groups, weights=weights, lagrange=1.2e4) 
 penalty.shape
 ```
 
 ```{python}
-problem = rr.simple_problem(loss, penalty)
-
+H = np.identity(loss.shape[0])
+XTX = loss.X.T.dot(loss.X)
+I = np.identity(X.shape[1])
+H[loss.matrix_slice][:,loss.matrix_slice] = (np.kron(I, XTX) + np.kron(XTX, I))
+problem = quasi_newton(loss, penalty, H)
+H.max()
 ```
 
 ```{python}
@@ -498,34 +477,44 @@ X[:,0][:10]
 
 ```{python}
 problem.coefs[:] = 0
-problem.coefs[-8:] = 1.
+problem.damping_term = 0.1
+problem.coefs[loss.scale_slice] = 1
+problem.quadratic_problem.coefs[:] = problem.coefs
 ```
 
 ```{python}
-soln = problem.solve(start_step=1/X.shape[0], min_its=50, debug=True)
+soln = problem.solve(niter=40, start_step=1./X.shape[0], maxfun=10, maxiter=20)
 ```
 
 ```{python}
-loss.smooth_objective(problem.coefs, 'grad')
-problem.coefs[-8:]
+f = plt.figure(figsize=(8,8))
+ax = plt.gca()
+ax.plot(problem.solver_results)
+ax.set_xticks(range(len(problem.solver_results)))
+ax.set_xticklabels([])
+ax.set_xlabel('Proximal Newton Step')
+ax.set_ylabel('Objective value');
 ```
 
-```{python}
-loss.sum_sq
-```
+## Sparsity pattern
 
 ```{python}
-problem.coefs[loss.matrix_slice].reshape((X.shape[1], X.shape[1]))[0]
-plt.plot(problem.solver_results)
-```
-
-```{python}
+f = plt.figure(figsize=(8,8))
+ax = plt.gca()
 matrix_soln = problem.coefs[loss.matrix_slice].reshape((X.shape[1], X.shape[1]))
 matrix_soln = matrix_soln[1:][:,1:]
-plt.imshow(matrix_soln != 0)
-matrix_soln = np.sign(matrix_soln) * np.log(np.fabs(matrix_soln)+1)
-plt.colorbar()
+ax.imshow(matrix_soln != 0, cmap='RdBu', interpolation='nearest', vmin=-np.fabs(matrix_soln).max(),
+         vmax=np.fabs(matrix_soln).max())
+ylim, xlim = ax.get_ylim(), ax.get_xlim()
+ax.xaxis.set_ticks(np.cumsum([X[:,d[2]].shape[1] for d in desc_full[1:]]) - 0.5)
+ax.yaxis.set_ticks(np.cumsum([X[:,d[2]].shape[1] for d in desc_full[1:]]) - 0.5)
+ax.set_xticklabels([d[0] for d in desc_full[1:]], rotation=270)
+ax.set_yticklabels([d[0] for d in desc_full[1:]])
+ax.grid(color='gray', linewidth=1, linestyle='--')
+f
 ```
+
+## Coefficients
 
 ```{python}
 f = plt.figure(figsize=(8,8))
@@ -533,42 +522,25 @@ ax = plt.gca()
 ax.imshow(matrix_soln, cmap='RdBu', interpolation='nearest', vmin=-np.fabs(matrix_soln).max(),
          vmax=np.fabs(matrix_soln).max())
 ylim, xlim = ax.get_ylim(), ax.get_xlim()
-ax.xaxis.set_ticks(np.cumsum([X[:,d[2]].shape[1] for d in desc2[1:]]) - 0.5)
-ax.yaxis.set_ticks(np.cumsum([X[:,d[2]].shape[1] for d in desc2[1:]]) - 0.5)
-ax.set_xticklabels([d[0] for d in desc2[1:]], rotation=270)
-ax.set_yticklabels([d[0] for d in desc2[1:]])
+ax.xaxis.set_ticks(np.cumsum([X[:,d[2]].shape[1] for d in desc_full[1:]]) - 0.5)
+ax.yaxis.set_ticks(np.cumsum([X[:,d[2]].shape[1] for d in desc_full[1:]]) - 0.5)
+ax.set_xticklabels([d[0] for d in desc_full[1:]], rotation=270)
+ax.set_yticklabels([d[0] for d in desc_full[1:]])
 ax.grid(color='gray', linewidth=1, linestyle='--')
 f
 ```
 
-```{python}
-matrix_soln.min()
-```
+## Mixin with `sklearn`
 
-```{python}
-group_keys = sorted(weights.keys())
-group_img = np.array([group_keys.index(g) for g in groups])[loss.matrix_slice].reshape((X.shape[1], X.shape[1]))
-```
-
-```{python}
-plt.imshow(group_img)
-plt.colorbar()
-```
-
-```{python}
-np.unique(group_img).shape
-```
-
-```{python}
-len(group_keys)
-```
-
-## Regular markdown
+We will want to cross-validate $\lambda$ so we'll want to fit this in 
+`sklearn`.
 
 ```{python}
 from regreg.sklearn.base import sklearn_regression
 
 class sklearn_mixed(sklearn_regression):
+
+    damping_term = 0.1
 
     """
 
@@ -587,7 +559,8 @@ class sklearn_mixed(sklearn_regression):
                  quadratic=None,
                  score_method='deviance',
                  solve_args={},
-                 initial=None):
+                 initial=None,
+                 niter=20):
         
         self.desc = desc
         self.initial = initial
@@ -601,27 +574,35 @@ class sklearn_mixed(sklearn_regression):
                                     solve_args=solve_args,
                                     initial=initial)
         self.solve_args = solve_args
+        self.niter = niter
         
-    def _loglike_factory(self, X, y):
-        loss = full_loss(X, self.desc)
-        return loss
+    def fit(self, X, y):
+         
+        loss = full_loss(X.copy(), self.desc)
+        
+        # from approx Hessian
+        
+        H = np.identity(loss.shape[0])
+        XTX = loss.X.T.dot(loss.X)
+        I = np.identity(loss.X.shape[1])
+        H[loss.matrix_slice][:,loss.matrix_slice] = 0.5 * (np.kron(I, XTX) + 
+                                                           np.kron(XTX, I))
+        atom_ = self._construct_atom()
+        problem = quasi_newton(loss, atom_, H)
+        problem.damping_term = self.damping_term
 
-    def _saturated_score(self,
-                         predictions,
-                         response,
-                         case_weights=None):
-
-        # XXX fix these scores!!!
-        if self.score_method == 'deviance':
-            return np.random.standard_normal()
-        elif self.score_method == 'mean_deviance':
-            return np.random.standard_normal()
-        elif self.score_method == 'R2':
-            SSE = np.sum(loss(predictions))
-            SST = np.sum(loss(response.mean() * np.ones_like(response)))
-            return np.mean(loss(predictions))
+        # initialize problem
+        if True: # self.initial is not None:
+            problem.coefs[:] = 0
+            problem.coefs[loss.scale_slice] = 1
+            problem.quadratic_problem.coefs[:] = problem.coefs
         else:
-            return np.nan
+            problem.coefs[:] = self.initial
+        self._coefs = problem.solve(niter=self.niter, 
+                                    maxiter=20,
+                                    maxfun=10, 
+                                    **self.solve_args)
+        self._history = problem.solver_results
         
     def score(self, X, y, sample_weight=None):
         '''
@@ -630,25 +611,17 @@ class sklearn_mixed(sklearn_regression):
         X : array-like, shape = (n_samples, n_features)
             Test samples.
 
-        y : array-like, shape = (n_samples) or (n_samples, n_outputs)
-            True values for X.
+        y : ignored
 
-        sample_weight : array-like, shape = [n_samples], optional
-            Sample weights.
+        sample_weight : ignored
 
         Returns
         -------
         score : float
         '''
-        return np.random.standard_normal() ### fix this!!!
-        predictions = X.dot(self._coefs)
-        if offset is not None:
-            predictions -= offset   # this is how offsets are incorporated
-                                    # in regreg
-        if sample_weight is not None:
-            if case_weights is not None:
-                case_weights *= sample_weight
-        return self._saturated_score(predictions, response, case_weights=case_weights)
+        test_loss = full_loss(X, self.desc)
+        return -test_loss.smooth_objective(self._coefs, 'func')
+        
 ```
 
 ```{python}
@@ -656,16 +629,72 @@ from sklearn.model_selection import cross_validate
 sklearn_loss = sklearn_mixed(rr.group_lasso,
                              {'groups':groups,
                               'weights':weights,
-                              'lagrange':10 * np.sqrt(X.shape[0])},
-                             desc2,
-                             solve_args={'start_step':1/X.shape[0], 'debug':True},                             
-                             initial=problem.coefs.copy())                                    
+                              'lagrange':penalty.lagrange},
+                             desc_full,
+                             solve_args={'start_step':1/X.shape[0]},                             
+                            )                                    
+sklearn_loss.fit(X.copy(), None)
+```
 
-sklearn_loss.fit(X, None)
+### Compare to fit above
+
+```{python}
+f = plt.figure(figsize=(8,8))
+ax = plt.gca()
+ax.plot(sklearn_loss._history, label='sklearn mixin')
+ax.plot(problem.solver_results, label='vanilla')
+ax.set_xticks(range(len(problem.solver_results)))
+ax.set_xticklabels([])
+ax.set_xlabel('Proximal Newton Step')
+ax.set_ylabel('Objective value');
+ax.legend()
 ```
 
 ```{python}
-cross_validate(sklearn_loss, X, np.ones(X.shape[0]), cv=3)
+(loss.smooth_objective(sklearn_loss._coefs, 'func'), 
+ loss.smooth_objective(problem.coefs, 'func'))
+```
+
+```{python}
+sklearn_matrix = sklearn_loss._coefs[loss.matrix_slice].reshape((X.shape[1], X.shape[1]))
+sklearn_matrix = sklearn_matrix[1:][:,1:]
+f = plt.figure(figsize=(8,8))
+ax = plt.gca()
+ax.imshow(sklearn_matrix, cmap='RdBu', interpolation='nearest', 
+          vmin=-np.fabs(sklearn_matrix).max(),
+          vmax=np.fabs(sklearn_matrix).max())
+ylim, xlim = ax.get_ylim(), ax.get_xlim()
+ax.xaxis.set_ticks(np.cumsum([X[:,d[2]].shape[1] for d in desc_full[1:]]) - 0.5)
+ax.yaxis.set_ticks(np.cumsum([X[:,d[2]].shape[1] for d in desc_full[1:]]) - 0.5)
+ax.set_xticklabels([d[0] for d in desc_full[1:]], rotation=270)
+ax.set_yticklabels([d[0] for d in desc_full[1:]])
+ax.grid(color='gray', linewidth=1, linestyle='--')
+```
+
+### Try `cross_validate`
+
+```{python}
+cross_validate(sklearn_loss, X.copy(), np.ones(X.shape[0]), cv=3)
+```
+
+```{python}
+from sklearn.model_selection import GridSearchCV
+```
+
+```{python}
+param_grid = {'atom_params': [{'groups':groups,
+                              'weights':weights,
+                              'lagrange':lamval} for lamval in 1e3 * np.linspace(5, 15, 11)]}
+grid = GridSearchCV(sklearn_loss, param_grid, cv=3)
+results = grid.fit(X.copy(), np.ones(X.shape[0]))
+```
+
+```{python}
+results.cv_results_['mean_test_score'], results.cv_results_['std_test_score']
+```
+
+```{python}
+
 ```
 
 ```{python}
